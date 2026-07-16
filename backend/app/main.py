@@ -60,11 +60,19 @@ async def upload_documents(workspace_id:str,files:list[UploadFile]=File(...),db=
         try:
             validate_signature(path,upload.filename or "",upload.content_type or "application/octet-stream")
             doc=Document(workspace_id=workspace_id,original_name=Path(upload.filename or "未命名").name,stored_name=stored,media_type=upload.content_type or "application/octet-stream",size_bytes=size,sha256=sha256_file(path),status="parsing")
-            db.add(doc); db.flush(); doc.chunks=parse_document(doc,path); doc.status="ready"; db.commit(); index_document(doc,doc.chunks); result.append(doc)
+            db.add(doc); db.flush(); doc.chunks=parse_document(doc,path); db.commit()
         except IntegrityError:
             db.rollback(); path.unlink(missing_ok=True); fail(409,"DUPLICATE_DOCUMENT","该工作区已存在内容相同的文件")
         except Exception as e:
-            path.unlink(missing_ok=True); fail(422,"DOCUMENT_PARSE_FAILED","无法解析该文档",{"reason":str(e)})
+            db.rollback(); path.unlink(missing_ok=True); fail(422,"DOCUMENT_PARSE_FAILED","无法解析该文档",{"reason":str(e)})
+        try:
+            index_document(doc,doc.chunks)
+            doc.status="ready"; doc.error_message=None; db.commit(); result.append(doc)
+        except Exception as e:
+            db.rollback(); failed_doc=db.get(Document,doc.id)
+            if failed_doc:
+                failed_doc.status="failed"; failed_doc.error_message=f"向量索引失败：{type(e).__name__}"; db.commit()
+            fail(502,"DOCUMENT_INDEX_FAILED","文档已解析，但建立向量索引失败",{"reason":str(e)})
     return result
 @app.get("/api/workspaces/{workspace_id}/documents",response_model=list[DocumentOut])
 def list_documents(workspace_id:str,db=Depends(db_dep)): return list(db.scalars(select(Document).where(Document.workspace_id==workspace_id).order_by(Document.created_at.desc())))
@@ -105,7 +113,9 @@ def retry_task(task_id:str,db=Depends(db_dep)):
     old=db.get(Task,task_id)
     if not old: fail(404,"TASK_NOT_FOUND","任务不存在")
     if old.status not in {"failed","cancelled","interrupted"}: fail(409,"TASK_NOT_RETRYABLE","当前任务不能重试")
-    t=Task(workspace_id=old.workspace_id,user_message=old.user_message,thread_id=old.thread_id); db.add(t); db.commit(); return t
+    # A retry is a fresh execution. Reusing the old LangGraph thread restores
+    # failed tool-call history and can immediately repeat the same loop.
+    t=Task(workspace_id=old.workspace_id,user_message=old.user_message); db.add(t); db.commit(); return t
 @app.get("/api/tasks/{task_id}/events")
 async def task_events(task_id:str,request:Request):
     last=int(request.headers.get("last-event-id","0") or 0)

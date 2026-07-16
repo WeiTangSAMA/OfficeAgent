@@ -50,6 +50,28 @@ def read_document_section(chunk_id: str, runtime: ToolRuntime[AgentContext]) -> 
         return json.dumps({"chunk_id":c.id,"document_name":d.original_name,"location":c.location_json,"content":c.content},ensure_ascii=False)
 
 @tool
+def inspect_document_overview(document_id: str, runtime: ToolRuntime[AgentContext]) -> str:
+    """读取一份文档的代表性片段，用于回答主题、内容概述和结构类问题。"""
+    with SessionLocal() as db:
+        d=_doc(db,runtime.context,document_id)
+        chunks=list(db.scalars(select(DocumentChunk).where(DocumentChunk.document_id==d.id).order_by(DocumentChunk.chunk_index)))
+        substantive=[c for c in chunks if len(c.content.strip())>=20]
+        if not substantive:
+            substantive=chunks
+        sample_size=min(12,len(substantive))
+        if sample_size<=1:
+            sampled=substantive[:1]
+        else:
+            indexes=sorted({round(i*(len(substantive)-1)/(sample_size-1)) for i in range(sample_size)})
+            sampled=[substantive[i] for i in indexes]
+        return json.dumps({
+            "document_id":d.id,
+            "document_name":d.original_name,
+            "chunk_count":len(chunks),
+            "representative_sections":[{"chunk_id":c.id,"location":c.location_json,"content":c.content[:1200]} for c in sampled],
+        },ensure_ascii=False)
+
+@tool
 def inspect_workbook(document_id: str, runtime: ToolRuntime[AgentContext]) -> str:
     """检查 XLSX 的工作表、维度、表头和公式数量，不计算公式。"""
     with SessionLocal() as db:
@@ -115,14 +137,20 @@ def workspace_prompt(request: ModelRequest) -> str:
     return f"""你是 OfficeDocumentAgent。当前 workspace_id={request.runtime.context.workspace_id}，task_id={request.runtime.context.task_id}。
 只能使用工具读取当前工作区 ready 文档；不得访问网络、系统命令、任意 SQL 或其他路径；不得修改上传文件。
 关键事实必须引用工具真实返回的 chunk/位置；信息不足或矛盾必须写入 warnings；生成文件后必须调用 validate_artifact。
+当用户询问整份文档讲了什么、主题、结构或概述时：先调用 list_documents，再对目标文档调用一次 inspect_document_overview；根据代表性片段直接作答，不要为了穷举全文而反复 search_documents/read_document_section。
 最终输出 TaskResult，中文简洁，citation id 必须与检索结果一致。"""
 
 def invoke_agent(task: Task) -> TaskResult:
-    model=ChatOpenAI(model=settings.qwen_model,api_key=settings.dashscope_api_key,base_url=settings.dashscope_base_url,temperature=settings.qwen_temperature,timeout=settings.qwen_timeout_seconds,max_retries=0)
+    model=ChatOpenAI(model=settings.qwen_model,api_key=settings.dashscope_api_key,base_url=settings.dashscope_base_url,temperature=settings.qwen_temperature,timeout=settings.qwen_timeout_seconds,max_retries=0,extra_body={"enable_thinking":False})
     conn=sqlite3.connect(settings.app_data_dir/'checkpoints.db',check_same_thread=False)
     saver=SqliteSaver(conn)
-    agent=create_agent(model=model,tools=[list_documents,search_documents,read_document_section,inspect_workbook,read_worksheet_range,analyze_table,create_docx,create_xlsx,validate_artifact],middleware=[workspace_prompt,ModelCallLimitMiddleware(run_limit=12,exit_behavior='error'),ToolCallLimitMiddleware(run_limit=30,exit_behavior='error'),ModelRetryMiddleware(max_retries=settings.qwen_max_retries,backoff_factor=2.0)],response_format=ToolStrategy(TaskResult,handle_errors=lambda e:f"结构不合法，请修复；最多两次：{type(e).__name__}"),context_schema=AgentContext,checkpointer=saver)
+    agent=create_agent(model=model,tools=[list_documents,search_documents,read_document_section,inspect_document_overview,inspect_workbook,read_worksheet_range,analyze_table,create_docx,create_xlsx,validate_artifact],middleware=[workspace_prompt,ModelCallLimitMiddleware(run_limit=20,exit_behavior='error'),ToolCallLimitMiddleware(run_limit=40,exit_behavior='error'),ModelRetryMiddleware(max_retries=settings.qwen_max_retries,backoff_factor=2.0,on_failure='error')],response_format=ToolStrategy(TaskResult,handle_errors=lambda e:f"结构不合法，请修复；最多两次：{type(e).__name__}"),context_schema=AgentContext,checkpointer=saver)
     try:
         state=agent.invoke({"messages":[{"role":"user","content":task.user_message}]},context=AgentContext(task.workspace_id,task.id),config={"configurable":{"thread_id":task.thread_id}})
-        return state["structured_response"]
+        structured=state.get("structured_response")
+        if structured is None:
+            messages=state.get("messages",[])
+            last_content=str(getattr(messages[-1],"content",""))[:500] if messages else ""
+            raise RuntimeError(f"MODEL_STRUCTURED_OUTPUT_MISSING: {last_content or '模型未返回结构化结果'}")
+        return structured
     finally: conn.close()
