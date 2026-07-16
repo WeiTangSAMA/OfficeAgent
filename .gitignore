@@ -1,0 +1,13 @@
+.env
+data/
+backend/data/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+node_modules/
+frontend/dist/
+.vite/
+*.egg-info/
+.idea/
+*.tsbuildinfo
+.venv/
