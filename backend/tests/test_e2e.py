@@ -9,6 +9,8 @@ from app.services import run_task
 def test_docx_to_cited_artifact():
     client=TestClient(app)
     workspace=client.post("/api/workspaces",json={"name":"端到端测试"}).json()
+    renamed=client.patch(f"/api/workspaces/{workspace['id']}",json={"name":"  合同分析  "})
+    assert renamed.status_code==200 and renamed.json()["name"]=="合同分析"
     stream=BytesIO(); doc=WordDocument(); doc.add_heading("采购合同",0); doc.add_paragraph("合同金额为人民币 120000 元，截止日期为 2026 年 12 月 31 日。"); doc.save(stream)
     upload=client.post(f"/api/workspaces/{workspace['id']}/documents",files=[("files",("contract.docx",stream.getvalue(),"application/vnd.openxmlformats-officedocument.wordprocessingml.document"))])
     assert upload.status_code==201 and upload.json()[0]["status"]=="ready"

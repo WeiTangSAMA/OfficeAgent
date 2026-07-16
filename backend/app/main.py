@@ -8,7 +8,7 @@ from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from .database import Base, engine, SessionLocal, session_scope
 from .models import Workspace, Document, Task, TaskEvent, Artifact, now
-from .schemas import WorkspaceCreate, WorkspaceOut, DocumentOut, TaskCreate, TaskOut
+from .schemas import WorkspaceCreate, WorkspaceUpdate, WorkspaceOut, DocumentOut, TaskCreate, TaskOut
 from .config import settings
 from .security import validate_signature, sha256_file, safe_child
 from .documents import parse_document
@@ -38,6 +38,13 @@ def get_workspace(workspace_id:str,db=Depends(db_dep)):
     w=db.get(Workspace,workspace_id)
     if not w: fail(404,"WORKSPACE_NOT_FOUND","工作区不存在")
     return w
+@app.patch("/api/workspaces/{workspace_id}",response_model=WorkspaceOut)
+def update_workspace(workspace_id:str,body:WorkspaceUpdate,db=Depends(db_dep)):
+    w=db.get(Workspace,workspace_id)
+    if not w: fail(404,"WORKSPACE_NOT_FOUND","工作区不存在")
+    name=body.name.strip()
+    if not name: fail(422,"INVALID_WORKSPACE_NAME","工作区名称不能为空")
+    w.name=name; w.updated_at=now(); db.commit(); db.refresh(w); return w
 @app.delete("/api/workspaces/{workspace_id}",status_code=204)
 def delete_workspace(workspace_id:str,db=Depends(db_dep)):
     w=db.get(Workspace,workspace_id)

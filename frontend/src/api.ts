@@ -7,6 +7,7 @@ async function request<T>(url:string,init?:RequestInit):Promise<T>{const r=await
 export const api={
   workspaces:()=>request<Workspace[]>('/api/workspaces'),
   createWorkspace:(name:string)=>request<Workspace>('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})}),
+  renameWorkspace:(id:string,name:string)=>request<Workspace>(`/api/workspaces/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})}),
   documents:(id:string)=>request<Doc[]>(`/api/workspaces/${id}/documents`),
   upload:(id:string,files:File[])=>{const f=new FormData();files.forEach(x=>f.append('files',x));return request<Doc[]>(`/api/workspaces/${id}/documents`,{method:'POST',body:f})},
   deleteDocument:(id:string)=>fetch(`/api/documents/${id}`,{method:'DELETE'}).then(r=>{if(!r.ok)throw new Error('删除失败')}),
