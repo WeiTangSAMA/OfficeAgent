@@ -1,4 +1,4 @@
-import {useEffect,useRef,useState} from 'react';
+import {useEffect,useRef,useState,type DragEvent} from 'react';
 import {useMutation,useQuery,useQueryClient} from '@tanstack/react-query';
 import {FileText,FileSpreadsheet,File,Upload,Trash2,Send,Plus,RefreshCw,Square,Download,CheckCircle2,AlertTriangle,LoaderCircle,ChevronDown,PanelRight,PanelLeft,Pencil,Check,X} from 'lucide-react';
 import {api,Artifact,Citation,Doc,Task} from './api';
@@ -9,7 +9,7 @@ function Icon({doc}:{doc:Doc}){return doc.original_name.endsWith('.xlsx')?<FileS
 function location(c:Citation){const x=c.location;return x.page?`第 ${x.page} 页`:x.sheet?`${x.sheet} · ${x.range}`:x.paragraph?`第 ${x.paragraph} 段`:'来源片段'}
 
 export default function App(){
- const qc=useQueryClient();const [workspace,setWorkspace]=useState(localStorage.getItem('workspace')||'');const [selected,setSelected]=useState('');const [message,setMessage]=useState('');const [quote,setQuote]=useState<Citation|null>(null);const [mobile,setMobile]=useState<'files'|'chat'|'run'>('chat');const [renaming,setRenaming]=useState(false);const [workspaceName,setWorkspaceName]=useState('');const fileInput=useRef<HTMLInputElement>(null);
+ const qc=useQueryClient();const [workspace,setWorkspace]=useState(localStorage.getItem('workspace')||'');const [selected,setSelected]=useState('');const [message,setMessage]=useState('');const [quote,setQuote]=useState<Citation|null>(null);const [mobile,setMobile]=useState<'files'|'chat'|'run'>('chat');const [renaming,setRenaming]=useState(false);const [workspaceName,setWorkspaceName]=useState('');const [dragging,setDragging]=useState(false);const fileInput=useRef<HTMLInputElement>(null);const dragDepth=useRef(0);
  const ws=useQuery({queryKey:['workspaces'],queryFn:api.workspaces});
  useEffect(()=>{if(!workspace&&ws.data?.[0])setWorkspace(ws.data[0].id)},[ws.data,workspace]); useEffect(()=>{if(workspace)localStorage.setItem('workspace',workspace)},[workspace]);
  const docs=useQuery({queryKey:['documents',workspace],queryFn:()=>api.documents(workspace),enabled:!!workspace});
@@ -20,6 +20,10 @@ export default function App(){
  useEffect(()=>{if(!task||!['queued','running'].includes(task.status))return;const es=new EventSource(`/api/tasks/${task.id}/events`);const refresh=()=>{qc.invalidateQueries({queryKey:['tasks',workspace]});qc.invalidateQueries({queryKey:['artifacts',task.id]})};['plan','step','citation','artifact','error','done'].forEach(x=>es.addEventListener(x,refresh));return()=>es.close()},[task?.id,task?.status,qc,workspace]);
  const createWs=useMutation({mutationFn:()=>api.createWorkspace(`新工作区 ${new Date().toLocaleDateString('zh-CN')}`),onSuccess:w=>{setWorkspace(w.id);qc.invalidateQueries({queryKey:['workspaces']})}});
  const upload=useMutation({mutationFn:(files:File[])=>api.upload(workspace,files),onSuccess:()=>qc.invalidateQueries({queryKey:['documents',workspace]})});
+ const onDragEnter=(e:DragEvent<HTMLElement>)=>{e.preventDefault();e.stopPropagation();if(!Array.from(e.dataTransfer.types).includes('Files'))return;dragDepth.current+=1;setDragging(true)};
+ const onDragOver=(e:DragEvent<HTMLElement>)=>{e.preventDefault();e.stopPropagation();e.dataTransfer.dropEffect='copy'};
+ const onDragLeave=(e:DragEvent<HTMLElement>)=>{e.preventDefault();e.stopPropagation();dragDepth.current=Math.max(0,dragDepth.current-1);if(dragDepth.current===0)setDragging(false)};
+ const onDrop=(e:DragEvent<HTMLElement>)=>{e.preventDefault();e.stopPropagation();dragDepth.current=0;setDragging(false);const files=Array.from(e.dataTransfer.files);if(files.length&&!upload.isPending)upload.mutate(files)};
  const run=useMutation({mutationFn:()=>api.createTask(workspace,message),onSuccess:t=>{setSelected(t.id);setMessage('');qc.invalidateQueries({queryKey:['tasks',workspace]});setMobile('run')}});
  const stop=useMutation({mutationFn:()=>api.cancel(task!.id),onSuccess:()=>qc.invalidateQueries({queryKey:['tasks',workspace]})});
  const retry=useMutation({mutationFn:()=>api.retry(task!.id),onSuccess:t=>{setSelected(t.id);qc.invalidateQueries({queryKey:['tasks',workspace]})}});
@@ -30,8 +34,9 @@ export default function App(){
  return <div className="shell">
   <header><div className="brand"><span className="brandMark"><FileText/></span><strong>案牍</strong><span>办公文档 Agent</span></div><div className="workspaceSelect"><label htmlFor="workspace">工作区</label><select id="workspace" value={workspace} onChange={e=>{setWorkspace(e.target.value);setSelected('');setRenaming(false);renameWs.reset()}}>{ws.data?.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select><ChevronDown/></div><button className="iconButton" title="新建工作区" onClick={()=>createWs.mutate()}><Plus/></button></header>
   <nav className="mobileNav" aria-label="工作台区域"><button className={mobile==='files'?'active':''} onClick={()=>setMobile('files')}><PanelLeft/>文件</button><button className={mobile==='chat'?'active':''} onClick={()=>setMobile('chat')}><FileText/>对话</button><button className={mobile==='run'?'active':''} onClick={()=>setMobile('run')}><PanelRight/>执行</button></nav>
-  <aside className={`filesPane pane mobile-${mobile}`}><div className="paneHead"><div><h2>工作区文件</h2><p>{docs.data?.length||0} 个文件 · {currentWs?.name}</p></div><button className="iconButton" title="上传文件" onClick={()=>fileInput.current?.click()}><Upload/></button></div>
-   <input ref={fileInput} hidden type="file" multiple accept=".pdf,.docx,.xlsx" onChange={e=>e.target.files&&upload.mutate([...e.target.files])}/>
+  <aside className={`filesPane pane mobile-${mobile} ${dragging?'dragging':''}`} onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop} aria-busy={upload.isPending}><div className="paneHead"><div><h2>工作区文件</h2><p>{docs.data?.length||0} 个文件 · {currentWs?.name}</p></div><button className="iconButton" title="上传文件" onClick={()=>fileInput.current?.click()}><Upload/></button></div>
+   <input ref={fileInput} hidden type="file" multiple accept=".pdf,.docx,.xlsx" onChange={e=>{const files=Array.from(e.target.files||[]);if(files.length)upload.mutate(files);e.currentTarget.value=''}}/>
+   {dragging&&<div className="dragOverlay" aria-hidden="true"><Upload/><strong>松开以上传文件</strong><span>支持 PDF、DOCX、XLSX</span></div>}
    {!docs.data?.length?<button className="dropzone" onClick={()=>fileInput.current?.click()}><Upload/><strong>拖拽或选择文件</strong><span>PDF、DOCX、XLSX · 单个最大 25 MB</span></button>:<div className="fileList">{docs.data.map(d=><div className="fileRow" key={d.id}><span className={`fileIcon ${d.status}`}><Icon doc={d}/></span><div><strong title={d.original_name}>{d.original_name}</strong><span>{size(d.size_bytes)} · {d.page_count?`${d.page_count} 页/表`:d.status}</span></div><span className={`status ${d.status}`}>{d.status==='ready'?'就绪':d.status==='parsing'?'解析中':'失败'}</span><button className="rowAction" title="删除" onClick={()=>api.deleteDocument(d.id).then(()=>qc.invalidateQueries({queryKey:['documents',workspace]}))}><Trash2/></button></div>)}</div>}
    {upload.isPending&&<div className="inlineState"><LoaderCircle className="spin"/>正在校验并解析文件…</div>}{upload.error&&<div className="error"><AlertTriangle/><span>{upload.error.message}</span></div>}
   </aside>
